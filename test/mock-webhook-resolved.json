@@ -1,0 +1,36 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighCPU\"}",
+  "status": "resolved",
+  "receiver": "wake-me-up",
+  "groupLabels": {
+    "alertname": "HighCPU"
+  },
+  "commonLabels": {
+    "alertname": "HighCPU",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "High CPU usage resolved"
+  },
+  "externalURL": "http://localhost:9093",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighCPU",
+        "instance": "server1:9100",
+        "severity": "warning",
+        "job": "node-exporter"
+      },
+      "annotations": {
+        "summary": "High CPU usage on server1",
+        "description": "CPU usage has returned to normal"
+      },
+      "startsAt": "2024-01-15T10:25:00.000Z",
+      "endsAt": "2024-01-15T10:35:00.000Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=up%7Bjob%3D%22prometheus%22%7D"
+    }
+  ]
+}
+

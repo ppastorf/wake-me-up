@@ -1,0 +1,65 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"MultipleAlerts\"}",
+  "status": "firing",
+  "receiver": "wake-me-up",
+  "groupLabels": {
+    "alertname": "MultipleAlerts"
+  },
+  "commonLabels": {
+    "alertname": "MultipleAlerts",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "Multiple critical alerts detected"
+  },
+  "externalURL": "http://localhost:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighCPU",
+        "instance": "server1:9100",
+        "severity": "warning",
+        "job": "node-exporter"
+      },
+      "annotations": {
+        "summary": "High CPU usage on server1",
+        "description": "CPU usage is above 80% for the last 5 minutes"
+      },
+      "startsAt": "2024-01-15T10:30:00.000Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=cpu_usage"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighMemory",
+        "instance": "server2:9100",
+        "severity": "critical",
+        "job": "node-exporter"
+      },
+      "annotations": {
+        "summary": "High memory usage on server2",
+        "description": "Memory usage is above 90% for the last 5 minutes"
+      },
+      "startsAt": "2024-01-15T10:28:00.000Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=memory_usage"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "DiskFull",
+        "instance": "server3:9100",
+        "severity": "critical",
+        "job": "node-exporter"
+      },
+      "annotations": {
+        "summary": "Disk space running low on server3",
+        "description": "Disk usage is above 95%"
+      },
+      "startsAt": "2024-01-15T10:25:00.000Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=disk_usage"
+    }
+  ]
+}
+
