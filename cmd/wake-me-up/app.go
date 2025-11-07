@@ -359,7 +359,7 @@ func (a *AppState) removeMatchingFiringAlerts(resolvedAlerts []Alert) []Alert {
 				if alertsMatch(resolvedAlert, entry.Alert) {
 					shouldRemove = true
 					matchedResolvedAlert = resolvedAlert
-					log.Infof("Removing firing alert %s - matches resolved alert with labels: %v", entry.ID, resolvedAlert.Labels)
+					log.Debugf("Removing firing alert %s - matches resolved alert with labels: %v", entry.ID, resolvedAlert.Labels)
 					break
 				}
 			}
@@ -473,7 +473,7 @@ func (a *AppState) ClearAcknowledgedAndResolved() int {
 	}
 
 	a.alerts = filtered
-	log.Infof("Cleared %d acknowledged/resolved alerts", clearedCount)
+	log.Debugf("Cleared %d acknowledged/resolved alerts", clearedCount)
 	a.mu.Unlock()
 
 	// Broadcast update to all WebSocket clients

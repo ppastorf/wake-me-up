@@ -9,6 +9,12 @@ build:
 build-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags '-extldflags "-s -w -static"' -o bin/$(BINARY_NAME) $(CMD_PATH)
 
+docker:
+	docker build -t $(BINARY_NAME) .
+
+docker-run:
+	docker run -d --name $(BINARY_NAME) -p 8080:8080 -v ./config:/config $(BINARY_NAME) -config=/config/config.example.yaml
+
 test:
 	go test -v ./...
 
