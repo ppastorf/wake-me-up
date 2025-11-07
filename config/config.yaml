@@ -1,7 +1,6 @@
 listen_port: 8080
 log_level: info
-sound_effect_file_path: "sounds/siren1.wav"
-
+sound_effect_file_path: 'sounds/siren1.wav'
 # Security settings (all optional)
 # webhook_api_key: "your-secret-api-key-here"  # API key for webhook authentication
 # allowed_ips:                                  # IP whitelist (supports CIDR notation)

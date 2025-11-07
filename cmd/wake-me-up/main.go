@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-var configPath = flag.String("config", "config/config.yaml", "Path to config.yaml.")
+var configPath = flag.String("config", "/etc/wake-me-up/config/config.yaml", "Path to config.yaml.")
 
 func main() {
 	flag.Parse()
