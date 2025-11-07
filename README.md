@@ -26,7 +26,7 @@ metadata:
   namespace: monitoring
 spec:
   route:
-    groupBy: ['alertname', 'resource_name']
+    groupBy: ['alertname']
     groupWait: 1s
     groupInterval: 5m
     repeatInterval: 1h
