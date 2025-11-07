@@ -1,0 +1,172 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 20px;
+}
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.header {
+    background: white;
+    padding: 30px;
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    margin-bottom: 20px;
+}
+h1 {
+    color: #333;
+    margin-bottom: 10px;
+}
+.status {
+    display: inline-block;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-weight: bold;
+    margin-top: 10px;
+}
+.status.active {
+    background: #ff4444;
+    color: white;
+    animation: pulse 2s infinite;
+}
+.status.clear {
+    background: #44ff44;
+    color: white;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+.alert-list {
+    display: grid;
+    gap: 20px;
+}
+.alert-card {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+}
+.alert-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #f0f0f0;
+}
+.alert-id {
+    font-size: 12px;
+    color: #666;
+}
+.alert-time {
+    font-size: 14px;
+    color: #999;
+}
+.alert-item {
+    background: #f8f9fa;
+    padding: 15px;
+    margin: 10px 0;
+    border-radius: 5px;
+    border-left: 4px solid #667eea;
+}
+.alert-item.firing {
+    border-left-color: #ff4444;
+    background: #fff5f5;
+}
+.alert-item.resolved {
+    border-left-color: #44ff44;
+    background: #f0fff4;
+}
+.alert-item.acknowledged {
+    border-left-color: #ffc107;
+    background: #fffbf0;
+}
+.alert-status {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+.alert-status.firing {
+    background: #ff4444;
+    color: white;
+}
+.alert-status.resolved {
+    background: #44ff44;
+    color: white;
+}
+.alert-status.acknowledged {
+    background: #ffc107;
+    color: #333;
+}
+.label {
+    display: inline-block;
+    background: #e9ecef;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    margin: 2px;
+    font-family: monospace;
+}
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: white;
+    font-size: 18px;
+}
+.refresh-btn {
+    background: #667eea;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 10px;
+}
+.refresh-btn:hover {
+    background: #5568d3;
+}
+.clear-btn {
+    background: #9e9e9e;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 10px;
+    margin-left: 10px;
+}
+.clear-btn:hover {
+    background: #757575;
+}
+.ack-btn {
+    background: #ff9800;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 10px;
+    font-weight: bold;
+}
+.ack-btn:hover {
+    background: #f57c00;
+}
+.ack-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+

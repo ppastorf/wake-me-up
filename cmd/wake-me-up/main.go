@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 )
 
 var configPath = flag.String("config", "config/config.yaml", "Path to config.yaml.")
@@ -38,6 +39,15 @@ func main() {
 		log.Infof("Webhook authentication enabled (API Key: %v, IP Whitelist: %v, Require HTTPS: %v)",
 			config.WebhookAPIKey != "", len(config.AllowedIPs) > 0, config.RequireHTTPS)
 	}
+
+	// Serve static files (CSS, JS)
+	// Resolve static directory path relative to working directory
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Failed to get working directory: %v", err)
+	}
+	staticDir := filepath.Join(wd, "static")
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
 	http.HandleFunc("/webhook", webhookHandlerFunc)
 	http.HandleFunc("/acknowledge", acknowledgeHandler(AppState))

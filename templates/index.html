@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wake me Up!</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚨 Wake me Up!</h1>
+            <div class="status {{.StatusClass}}">
+                {{.StatusText}}
+            </div>
+            <button class="clear-btn" onclick="clearAlerts()">Clear</button>
+        </div>
+        <div class="alert-list">
+            {{if .Alerts}}
+                {{range .Alerts}}
+                <div class="alert-card">
+                    <div class="alert-header">
+                        <div>
+                            <div class="alert-id">ID: {{.ID}}</div>
+                            <div class="alert-time">{{.Timestamp}}</div>
+                        </div>
+                        <div>
+                            <div class="alert-status {{.StatusClass}}">{{.StatusText}}</div>
+                        </div>
+                    </div>
+                    {{if .ShowAckButton}}
+                    <div style="margin-bottom: 15px;">
+                        <button class="ack-btn" onclick="acknowledgeAlert('{{.ID}}')">
+                            ✓ Acknowledge Alert
+                        </button>
+                    </div>
+                    {{end}}
+                    <div class="alert-item {{.StatusClass}}">
+                        {{if .AlertName}}
+                        <div style="margin: 8px 0;"><span style="font-size: 16px; font-weight: bold; color: #333;">{{.AlertName}}</span></div>
+                        {{end}}
+                        {{if .Labels}}
+                        <div style="margin: 8px 0;"><strong>Labels:</strong><br>
+                            {{range .Labels}}
+                            <span class="label">{{.Key}}={{.Value}}</span>
+                            {{end}}
+                        </div>
+                        {{end}}
+                        <div style="margin-top: 8px; font-size: 12px; color: #666;">
+                            Started: {{.StartsAt}}
+                        </div>
+                        {{if .EndsAt}}
+                        <div style="margin-top: 4px; font-size: 12px; color: #666;">
+                            Ended: {{.EndsAt}}
+                        </div>
+                        {{end}}
+                    </div>
+                </div>
+                {{end}}
+            {{else}}
+            <div class="empty-state">
+                <h2>No alerts received yet</h2>
+                <p>Waiting for Alertmanager to send alerts...</p>
+            </div>
+            {{end}}
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
+

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -599,644 +600,127 @@ func wsHandler(state *AppState) http.HandlerFunc {
 	}
 }
 
+// TemplateData holds the data for rendering the index template
+type TemplateData struct {
+	StatusClass string
+	StatusText  string
+	Alerts      []AlertTemplateData
+}
+
+// AlertTemplateData holds data for a single alert in the template
+type AlertTemplateData struct {
+	ID            string
+	Timestamp     string
+	StatusClass   string
+	StatusText    string
+	ShowAckButton bool
+	AlertName     string
+	Labels        []LabelData
+	StartsAt      string
+	EndsAt        string
+}
+
+// LabelData holds label key-value pairs for the template
+type LabelData struct {
+	Key   string
+	Value string
+}
+
 func indexHandler(state *AppState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		alerts := state.GetAlerts()
 		hasUnacknowledged := state.HasUnacknowledgedAlerts()
 
-		html := `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wake me Up!</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .header {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-bottom: 20px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-        }
-        .status {
-            display: inline-block;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: bold;
-            margin-top: 10px;
-        }
-        .status.active {
-            background: #ff4444;
-            color: white;
-            animation: pulse 2s infinite;
-        }
-        .status.clear {
-            background: #44ff44;
-            color: white;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-        .alert-list {
-            display: grid;
-            gap: 20px;
-        }
-        .alert-card {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-        .alert-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid #f0f0f0;
-        }
-        .alert-id {
-            font-size: 12px;
-            color: #666;
-        }
-        .alert-time {
-            font-size: 14px;
-            color: #999;
-        }
-        .alert-item {
-            background: #f8f9fa;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 5px;
-            border-left: 4px solid #667eea;
-        }
-        .alert-item.firing {
-            border-left-color: #ff4444;
-            background: #fff5f5;
-        }
-        .alert-item.resolved {
-            border-left-color: #44ff44;
-            background: #f0fff4;
-        }
-        .alert-item.acknowledged {
-            border-left-color: #ffc107;
-            background: #fffbf0;
-        }
-        .alert-status {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: bold;
-            margin-bottom: 8px;
-        }
-        .alert-status.firing {
-            background: #ff4444;
-            color: white;
-        }
-        .alert-status.resolved {
-            background: #44ff44;
-            color: white;
-        }
-        .alert-status.acknowledged {
-            background: #ffc107;
-            color: #333;
-        }
-        .label {
-            display: inline-block;
-            background: #e9ecef;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            margin: 2px;
-            font-family: monospace;
-        }
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: white;
-            font-size: 18px;
-        }
-        .refresh-btn {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            margin-top: 10px;
-        }
-        .refresh-btn:hover {
-            background: #5568d3;
-        }
-        .clear-btn {
-            background: #9e9e9e;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            margin-top: 10px;
-            margin-left: 10px;
-        }
-        .clear-btn:hover {
-            background: #757575;
-        }
-        .ack-btn {
-            background: #ff9800;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            margin-top: 10px;
-            font-weight: bold;
-        }
-        .ack-btn:hover {
-            background: #f57c00;
-        }
-        .ack-btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-    </style>
-    <script>
-        // WebSocket connection
-        let ws = null;
-        let reconnectTimeout = null;
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 10;
-        const reconnectDelay = 3000;
-
-        // Current state
-        let currentAlerts = [];
-        let currentHasUnacknowledged = false;
-
-        // Sound playback
-        let soundAudio = null;
-        let soundInterval = null;
-        let soundEnabled = true;
-        let audioContextUnlocked = false;
-
-        function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + window.location.host + '/ws';
-            
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = function() {
-                console.log('WebSocket connected');
-                reconnectAttempts = 0;
-            };
-
-            ws.onmessage = function(event) {
-                try {
-                    const message = JSON.parse(event.data);
-                    if (message.type === 'update') {
-                        currentAlerts = message.alerts || [];
-                        currentHasUnacknowledged = message.hasUnacknowledged || false;
-                        updateUI();
-                        updateSoundStatus();
-                    }
-                } catch (error) {
-                    console.error('Error parsing WebSocket message:', error);
-                }
-            };
-
-            ws.onerror = function(error) {
-                console.error('WebSocket error:', error);
-            };
-
-            ws.onclose = function() {
-                console.log('WebSocket disconnected');
-                ws = null;
-                
-                // Attempt to reconnect
-                if (reconnectAttempts < maxReconnectAttempts) {
-                    reconnectAttempts++;
-                    reconnectTimeout = setTimeout(connectWebSocket, reconnectDelay);
-                    console.log('Attempting to reconnect (' + reconnectAttempts + '/' + maxReconnectAttempts + ')...');
-                } else {
-                    console.error('Max reconnection attempts reached');
-                }
-            };
-        }
-
-        function acknowledgeAlert(alertId) {
-            // Unlock audio context if needed (this is user interaction)
-            if (!audioContextUnlocked) {
-                if (!soundAudio) {
-                    initializeAudio();
-                }
-                if (soundAudio) {
-                    soundAudio.play().then(() => {
-                        audioContextUnlocked = true;
-                        soundAudio.pause();
-                        soundAudio.currentTime = 0;
-                    }).catch(err => {
-                        console.error('Error unlocking audio:', err);
-                    });
-                }
-            }
-            
-            fetch('/acknowledge?id=' + alertId, {
-                method: 'POST'
-            })
-            .then(response => {
-                if (!response.ok) {
-                    alert('Failed to acknowledge alert');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to acknowledge alert');
-            });
-        }
-
-        function clearAlerts() {
-            // Unlock audio context if needed (this is user interaction)
-            if (!audioContextUnlocked) {
-                if (!soundAudio) {
-                    initializeAudio();
-                }
-                if (soundAudio) {
-                    soundAudio.play().then(() => {
-                        audioContextUnlocked = true;
-                        soundAudio.pause();
-                        soundAudio.currentTime = 0;
-                    }).catch(err => {
-                        console.error('Error unlocking audio:', err);
-                    });
-                }
-            }
-            
-            fetch('/clear', {
-                method: 'POST'
-            })
-            .then(response => {
-                if (!response.ok) {
-                    alert('Failed to clear alerts');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to clear alerts');
-            });
-        }
-
-        function updateUI() {
-            // Update status indicator
-            const statusEl = document.querySelector('.status');
-            if (statusEl) {
-                statusEl.className = 'status ' + (currentHasUnacknowledged ? 'active' : 'clear');
-                statusEl.textContent = currentHasUnacknowledged ? '⚠️ UNACKNOWLEDGED ALERTS' : '✓ ALL CLEAR';
-            }
-
-            // Update alert list
-            const alertListEl = document.querySelector('.alert-list');
-            if (!alertListEl) return;
-
-            if (currentAlerts.length === 0) {
-                alertListEl.innerHTML = '<div class="empty-state">' +
-                    '<h2>No alerts received yet</h2>' +
-                    '<p>Waiting for Alertmanager to send alerts...</p>' +
-                    '</div>';
-                return;
-            }
-
-            let html = '';
-            currentAlerts.forEach(entry => {
-                const alert = entry.alert || entry.Alert;
-                const isAcknowledged = entry.isAcknowledged || false;
-                
-                // Determine status
-                let statusClass = 'resolved';
-                let statusText = 'Resolved';
-                const alertStatus = alert.status || alert.Status;
-
-                if (alertStatus === 'firing') {
-                    if (isAcknowledged) {
-                        statusClass = 'acknowledged';
-                        statusText = 'Acknowledged';
-                    } else {
-                        statusClass = 'firing';
-                        statusText = 'Firing';
-                    }
-                } else if (alertStatus === 'resolved') {
-                    statusClass = 'resolved';
-                    statusText = 'Resolved';
-                }
-
-                const timestamp = entry.timestamp || entry.Timestamp;
-                const timestampStr = typeof timestamp === 'string' ? timestamp : new Date(timestamp).toLocaleString();
-
-                html += '<div class="alert-card">' +
-                    '<div class="alert-header">' +
-                    '<div>' +
-                    '<div class="alert-id">ID: ' + (entry.id || entry.ID) + '</div>' +
-                    '<div class="alert-time">' + timestampStr + '</div>' +
-                    '</div>' +
-                    '<div>' +
-                    '<div class="alert-status ' + statusClass + '">' + statusText + '</div>' +
-                    '</div>' +
-                    '</div>';
-
-                if (alertStatus === 'firing' && !isAcknowledged) {
-                    html += '<div style="margin-bottom: 15px;">' +
-                        '<button class="ack-btn" onclick="acknowledgeAlert(\'' + (entry.id || entry.ID) + '\')">' +
-                        '✓ Acknowledge Alert' +
-                        '</button>' +
-                        '</div>';
-                }
-
-                html += '<div class="alert-item ' + statusClass + '">';
-
-                const labels = alert.labels || alert.Labels || {};
-                if (Object.keys(labels).length > 0) {
-                    const alertName = labels.alertname || labels.alertname;
-                    if (alertName) {
-                        html += '<div style="margin: 8px 0;"><span style="font-size: 16px; font-weight: bold; color: #333;">' + alertName + '</span></div>';
-                    }
-
-                    html += '<div style="margin: 8px 0;"><strong>Labels:</strong><br>';
-                    const labelKeys = Object.keys(labels).sort();
-                    labelKeys.forEach(function(k) {
-                        html += '<span class="label">' + k + '=' + labels[k] + '</span>';
-                    });
-                    html += '</div>';
-                }
-
-                const startsAt = alert.startsAt || alert.StartsAt;
-                if (startsAt) {
-                    const startsAtStr = typeof startsAt === 'string' ? startsAt : new Date(startsAt).toLocaleString();
-                    html += '<div style="margin-top: 8px; font-size: 12px; color: #666;">Started: ' + startsAtStr + '</div>';
-                }
-
-                const endsAt = alert.endsAt || alert.EndsAt;
-                if (endsAt) {
-                    const endsAtStr = typeof endsAt === 'string' ? endsAt : new Date(endsAt).toLocaleString();
-                    html += '<div style="margin-top: 4px; font-size: 12px; color: #666;">Ended: ' + endsAtStr + '</div>';
-                }
-
-                html += '</div></div>';
-            });
-
-            alertListEl.innerHTML = html;
-        }
-
-        function initializeAudio() {
-            if (!soundAudio) {
-                soundAudio = new Audio('/sound');
-                soundAudio.volume = 1.0;
-                soundAudio.preload = 'auto';
-                
-                soundAudio.addEventListener('ended', function() {
-                    if (soundInterval !== null && soundEnabled && currentHasUnacknowledged) {
-                        setTimeout(() => {
-                            if (soundInterval !== null && soundEnabled && currentHasUnacknowledged) {
-                                soundAudio.play().catch(err => {
-                                    console.error('Error playing sound after end:', err);
-                                });
-                            }
-                        }, 2000);
-                    }
-                });
-                
-                soundAudio.addEventListener('error', function(e) {
-                    console.error('Error loading sound:', e);
-                    stopSoundLoop();
-                });
-            }
-        }
-
-        function updateSoundStatus() {
-            if (currentHasUnacknowledged && soundEnabled && audioContextUnlocked) {
-                        startSoundLoop();
-                    } else {
-                        stopSoundLoop();
-                    }
-        }
-
-        function startSoundLoop() {
-            if (soundInterval !== null) {
-                return;
-            }
-            
-            if (!soundAudio || !soundEnabled || !audioContextUnlocked) {
-                return;
-            }
-
-            soundAudio.play().catch(err => {
-                console.error('Error playing sound:', err);
-            });
-
-            soundInterval = setInterval(() => {
-                if (!soundEnabled || !audioContextUnlocked || !currentHasUnacknowledged) {
-                    stopSoundLoop();
-                    return;
-                }
-                
-                if (soundAudio.paused && soundInterval !== null) {
-                            soundAudio.play().catch(err => {
-                                console.error('Error restarting sound:', err);
-                            });
-                        }
-            }, 1000);
-        }
-
-        function stopSoundLoop() {
-            if (soundInterval !== null) {
-                clearInterval(soundInterval);
-                soundInterval = null;
-            }
-            if (soundAudio && !soundAudio.paused) {
-                soundAudio.pause();
-                soundAudio.currentTime = 0;
-            }
-        }
-
-        // Initialize audio
-        initializeAudio();
-
-        // Try to unlock audio context automatically
-        if (soundAudio) {
-            soundAudio.play().then(() => {
-                audioContextUnlocked = true;
-                soundAudio.pause();
-                soundAudio.currentTime = 0;
-            }).catch(err => {
-                console.log('Could not auto-unlock audio. Audio will unlock on next user interaction.');
-                const unlockOnInteraction = function() {
-                    if (!audioContextUnlocked && soundAudio) {
-                        soundAudio.play().then(() => {
-                            audioContextUnlocked = true;
-                            soundAudio.pause();
-                            soundAudio.currentTime = 0;
-                            updateSoundStatus();
-                        }).catch(e => {
-                            console.error('Error unlocking audio:', e);
-                        });
-                    }
-                    document.removeEventListener('click', unlockOnInteraction);
-                    document.removeEventListener('keydown', unlockOnInteraction);
-                };
-                document.addEventListener('click', unlockOnInteraction, { once: true });
-                document.addEventListener('keydown', unlockOnInteraction, { once: true });
-            });
-        }
-
-        // Connect WebSocket
-        connectWebSocket();
-
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', function() {
-            if (ws) {
-                ws.close();
-            }
-            if (reconnectTimeout) {
-                clearTimeout(reconnectTimeout);
-            }
-            stopSoundLoop();
-        });
-    </script>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🚨 Wake me Up!</h1>
-            <div class="status ` + getStatusClass(hasUnacknowledged) + `">
-                ` + getStatusText(hasUnacknowledged) + `
-            </div>
-            <button class="clear-btn" onclick="clearAlerts()">Clear</button>
-        </div>
-        <div class="alert-list">`
-
-		if len(alerts) == 0 {
-			html += `
-            <div class="empty-state">
-                <h2>No alerts received yet</h2>
-                <p>Waiting for Alertmanager to send alerts...</p>
-            </div>`
-		} else {
-			for _, entry := range alerts {
-				isAcknowledged := state.IsAcknowledged(entry.ID)
-				alert := entry.Alert
-
-				// Determine status class and text
-				statusClass := "resolved"
-				statusText := "Resolved"
-
-				if alert.Status == "firing" {
-					if isAcknowledged {
-						statusClass = "acknowledged"
-						statusText = "Acknowledged"
-					} else {
-						statusClass = "firing"
-						statusText = "Firing"
-					}
-				} else if alert.Status == "resolved" {
-					statusClass = "resolved"
-					statusText = "Resolved"
-				}
-
-				html += fmt.Sprintf(`
-            <div class="alert-card">
-                <div class="alert-header">
-                    <div>
-                        <div class="alert-id">ID: %s</div>
-                        <div class="alert-time">%s</div>
-                    </div>
-                    <div>
-                        <div class="alert-status %s">%s</div>
-                    </div>
-                </div>`, entry.ID, entry.Timestamp.Format("2006-01-02 15:04:05"), statusClass, statusText)
-
-				if alert.Status == "firing" && !isAcknowledged {
-					html += fmt.Sprintf(`
-                <div style="margin-bottom: 15px;">
-                    <button class="ack-btn" onclick="acknowledgeAlert('%s')">
-                        ✓ Acknowledge Alert
-                    </button>
-                </div>`, entry.ID)
-				}
-
-				html += fmt.Sprintf(`
-                <div class="alert-item %s">`, statusClass)
-
-				if len(alert.Labels) > 0 {
-					// Extract alertname if it exists
-					alertName := ""
-					if name, exists := alert.Labels["alertname"]; exists {
-						alertName = name
-					}
-
-					// Display alertname on top
-					if alertName != "" {
-						html += fmt.Sprintf(`<div style="margin: 8px 0;"><span style="font-size: 16px; font-weight: bold; color: #333;">%s</span></div>`, alertName)
-					}
-
-					// Display Labels section
-					html += `<div style="margin: 8px 0;"><strong>Labels:</strong><br>`
-
-					// Sort labels by key for consistent display
-					labelKeys := make([]string, 0, len(alert.Labels))
-					for k := range alert.Labels {
-						labelKeys = append(labelKeys, k)
-					}
-					sort.Strings(labelKeys)
-					for _, k := range labelKeys {
-						html += fmt.Sprintf(`<span class="label">%s=%s</span>`, k, alert.Labels[k])
-					}
-					html += `</div>`
-				}
-
-				html += fmt.Sprintf(`
-                    <div style="margin-top: 8px; font-size: 12px; color: #666;">
-                        Started: %s
-                    </div>`, alert.StartsAt.Format("2006-01-02 15:04:05"))
-
-				if alert.EndsAt != nil {
-					html += fmt.Sprintf(`
-                    <div style="margin-top: 4px; font-size: 12px; color: #666;">
-                        Ended: %s
-                    </div>`, alert.EndsAt.Format("2006-01-02 15:04:05"))
-				}
-
-				html += `</div></div>`
-			}
+		// Prepare template data
+		templateData := TemplateData{
+			StatusClass: getStatusClass(hasUnacknowledged),
+			StatusText:  getStatusText(hasUnacknowledged),
+			Alerts:      make([]AlertTemplateData, 0),
 		}
 
-		html += `
-        </div>
-    </div>
-</body>
-</html>`
+		// Convert alerts to template data
+		for _, entry := range alerts {
+			isAcknowledged := state.IsAcknowledged(entry.ID)
+			alert := entry.Alert
+
+			// Determine status class and text
+			statusClass := "resolved"
+			statusText := "Resolved"
+
+			if alert.Status == "firing" {
+				if isAcknowledged {
+					statusClass = "acknowledged"
+					statusText = "Acknowledged"
+				} else {
+					statusClass = "firing"
+					statusText = "Firing"
+				}
+			} else if alert.Status == "resolved" {
+				statusClass = "resolved"
+				statusText = "Resolved"
+			}
+
+			// Extract alertname if it exists
+			alertName := ""
+			if name, exists := alert.Labels["alertname"]; exists {
+				alertName = name
+			}
+
+			// Prepare labels
+			labels := make([]LabelData, 0)
+			if len(alert.Labels) > 0 {
+				labelKeys := make([]string, 0, len(alert.Labels))
+				for k := range alert.Labels {
+					labelKeys = append(labelKeys, k)
+				}
+				sort.Strings(labelKeys)
+				for _, k := range labelKeys {
+					labels = append(labels, LabelData{Key: k, Value: alert.Labels[k]})
+				}
+			}
+
+			// Format timestamps
+			endsAt := ""
+			if alert.EndsAt != nil {
+				endsAt = alert.EndsAt.Format("2006-01-02 15:04:05")
+			}
+
+			alertData := AlertTemplateData{
+				ID:            entry.ID,
+				Timestamp:     entry.Timestamp.Format("2006-01-02 15:04:05"),
+				StatusClass:   statusClass,
+				StatusText:    statusText,
+				ShowAckButton: alert.Status == "firing" && !isAcknowledged,
+				AlertName:     alertName,
+				Labels:        labels,
+				StartsAt:      alert.StartsAt.Format("2006-01-02 15:04:05"),
+				EndsAt:        endsAt,
+			}
+
+			templateData.Alerts = append(templateData.Alerts, alertData)
+		}
+
+		// Parse and execute template
+		// Resolve template path relative to working directory
+		wd, err := os.Getwd()
+		if err != nil {
+			log.Errorf("Error getting working directory: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		templatePath := filepath.Join(wd, "templates", "index.html")
+		tmpl, err := template.ParseFiles(templatePath)
+		if err != nil {
+			log.Errorf("Error parsing template: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(html))
+		if err := tmpl.Execute(w, templateData); err != nil {
+			log.Errorf("Error executing template: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 }
