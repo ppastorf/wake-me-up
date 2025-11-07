@@ -42,6 +42,9 @@ func main() {
 	http.HandleFunc("/webhook", webhookHandlerFunc)
 	http.HandleFunc("/acknowledge", acknowledgeHandler(AppState))
 	http.HandleFunc("/clear", clearHandler(AppState))
+	http.HandleFunc("/sound", soundHandler(AppState))
+	http.HandleFunc("/status", statusHandler(AppState))
+	http.HandleFunc("/ws", wsHandler(AppState))
 	http.HandleFunc("/", indexHandler(AppState))
 
 	log.Infof("Starting server on port %s", config.ListenPort)

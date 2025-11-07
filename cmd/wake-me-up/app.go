@@ -4,30 +4,267 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type AppState struct {
-	mu              sync.RWMutex
-	alerts          []AlertEntry
-	maxSize         int
-	config          *Config
-	acknowledged    map[string]bool // alert ID -> acknowledged
-	soundPlaying    bool
-	soundStopChan   chan struct{}
-	currentSoundCmd *exec.Cmd // current playing sound command
+	mu           sync.RWMutex
+	alerts       []AlertEntry
+	maxSize      int
+	config       *Config
+	acknowledged map[string]bool // alert ID -> acknowledged
+	hub          *Hub            // WebSocket hub for real-time updates
+}
+
+// Hub maintains the set of active clients and broadcasts messages to them
+type Hub struct {
+	// Registered clients
+	clients map[*Client]bool
+
+	// Inbound messages from clients
+	broadcast chan []byte
+
+	// Register requests from clients
+	register chan *Client
+
+	// Unregister requests from clients
+	unregister chan *Client
+}
+
+// Client is a middleman between the websocket connection and the hub
+type Client struct {
+	hub *Hub
+
+	// The websocket connection
+	conn *websocket.Conn
+
+	// Buffered channel of outbound messages
+	send chan []byte
+}
+
+// UpdateMessage represents a message sent over WebSocket
+type UpdateMessage struct {
+	Type              string              `json:"type"`
+	Alerts            []AlertEntryWithAck `json:"alerts,omitempty"`
+	HasUnacknowledged bool                `json:"hasUnacknowledged,omitempty"`
+}
+
+// AlertEntryWithAck includes the acknowledged status
+type AlertEntryWithAck struct {
+	ID             string    `json:"id"`
+	Timestamp      time.Time `json:"timestamp"`
+	Alert          Alert     `json:"alert"`
+	IsAcknowledged bool      `json:"isAcknowledged"`
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow connections from any origin
+	},
 }
 
 func NewAppState(maxSize int) *AppState {
+	hub := newHub()
+	go hub.run()
+
 	return &AppState{
-		alerts:        make([]AlertEntry, 0),
-		maxSize:       maxSize,
-		acknowledged:  make(map[string]bool),
-		soundStopChan: make(chan struct{}),
+		alerts:       make([]AlertEntry, 0),
+		maxSize:      maxSize,
+		acknowledged: make(map[string]bool),
+		hub:          hub,
 	}
+}
+
+// newHub creates a new Hub
+func newHub() *Hub {
+	return &Hub{
+		broadcast:  make(chan []byte),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		clients:    make(map[*Client]bool),
+	}
+}
+
+// run starts the hub's main loop
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.clients[client] = true
+
+		case client := <-h.unregister:
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+
+		case message := <-h.broadcast:
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+		}
+	}
+}
+
+// broadcastUpdate sends an update to all connected clients
+func (a *AppState) broadcastUpdate() {
+	a.mu.RLock()
+	alerts := make([]AlertEntry, len(a.alerts))
+	copy(alerts, a.alerts)
+	hasUnacknowledged := a.HasUnacknowledgedAlerts()
+	acknowledged := make(map[string]bool)
+	for k, v := range a.acknowledged {
+		acknowledged[k] = v
+	}
+	a.mu.RUnlock()
+
+	// Convert to AlertEntryWithAck format
+	alertsWithAck := make([]AlertEntryWithAck, len(alerts))
+	for i, entry := range alerts {
+		alertsWithAck[i] = AlertEntryWithAck{
+			ID:             entry.ID,
+			Timestamp:      entry.Timestamp,
+			Alert:          entry.Alert,
+			IsAcknowledged: acknowledged[entry.ID],
+		}
+	}
+
+	// Sort alerts: firing first, then acknowledged, then resolved
+	sort.Slice(alertsWithAck, func(i, j int) bool {
+		iEntry := alertsWithAck[i]
+		jEntry := alertsWithAck[j]
+
+		iPriority := getAlertPriority(iEntry.Alert.Status, iEntry.IsAcknowledged)
+		jPriority := getAlertPriority(jEntry.Alert.Status, jEntry.IsAcknowledged)
+
+		if iPriority != jPriority {
+			return iPriority < jPriority
+		}
+
+		return iEntry.Timestamp.After(jEntry.Timestamp)
+	})
+
+	message := UpdateMessage{
+		Type:              "update",
+		Alerts:            alertsWithAck,
+		HasUnacknowledged: hasUnacknowledged,
+	}
+
+	jsonData, err := json.Marshal(message)
+	if err != nil {
+		log.Errorf("Error marshaling update message: %v", err)
+		return
+	}
+
+	select {
+	case a.hub.broadcast <- jsonData:
+	default:
+		// Non-blocking send
+	}
+}
+
+// readPump pumps messages from the websocket connection to the hub
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	for {
+		_, _, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Errorf("WebSocket error: %v", err)
+			}
+			break
+		}
+	}
+}
+
+// writePump pumps messages from the hub to the websocket connection
+func (c *Client) writePump() {
+	ticker := time.NewTicker(54 * time.Second)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !ok {
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			w, err := c.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+			w.Write(message)
+
+			// Add queued messages to the current websocket message
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				w.Write([]byte{'\n'})
+				w.Write(<-c.send)
+			}
+
+			if err := w.Close(); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// serveWebSocket handles websocket requests from clients
+func serveWebSocket(hub *Hub, state *AppState, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Errorf("WebSocket upgrade error: %v", err)
+		return
+	}
+
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	client.hub.register <- client
+
+	// Send initial state (will be sent via broadcastUpdate in a moment)
+
+	// Start client pumps
+	go client.writePump()
+	go client.readPump()
+
+	// Send initial state after client is registered
+	go func() {
+		time.Sleep(100 * time.Millisecond) // Small delay to ensure client is registered
+		state.broadcastUpdate()
+	}()
 }
 
 func (a *AppState) AddWebhook(payload WebhookPayload) {
@@ -77,8 +314,8 @@ func (a *AppState) AddWebhook(payload WebhookPayload) {
 	}
 	a.mu.Unlock()
 
-	// Check if there are unacknowledged firing alerts and start/continue sound loop
-	a.checkAndPlaySound()
+	// Broadcast update to all WebSocket clients
+	a.broadcastUpdate()
 }
 
 // hasResolvedAlerts checks if any alerts in the payload are resolved
@@ -209,10 +446,10 @@ func (a *AppState) Acknowledge(alertID string) {
 	a.mu.Lock()
 	a.acknowledged[alertID] = true
 	a.mu.Unlock()
-
-	// Stop sound if no more unacknowledged alerts
-	a.checkAndPlaySound()
 	log.Infof("Alert %s acknowledged", alertID)
+
+	// Broadcast update to all WebSocket clients
+	a.broadcastUpdate()
 }
 
 func (a *AppState) ClearAcknowledgedAndResolved() int {
@@ -238,146 +475,68 @@ func (a *AppState) ClearAcknowledgedAndResolved() int {
 	log.Infof("Cleared %d acknowledged/resolved alerts", clearedCount)
 	a.mu.Unlock()
 
-	// Stop sound if no more unacknowledged alerts
-	a.checkAndPlaySound()
+	// Broadcast update to all WebSocket clients
+	a.broadcastUpdate()
 
 	return clearedCount
 }
 
-// startSound starts playing a sound and returns the command so it can be killed
-func (a *AppState) startSound(soundFilePath string) *exec.Cmd {
-	var cmd *exec.Cmd
-
-	if _, err := exec.LookPath("afplay"); err == nil {
-		// macOS
-		cmd = exec.Command("afplay", soundFilePath)
-	} else if _, err := exec.LookPath("paplay"); err == nil {
-		// Linux with PulseAudio
-		cmd = exec.Command("paplay", soundFilePath)
-	} else if _, err := exec.LookPath("aplay"); err == nil {
-		// Linux with ALSA
-		cmd = exec.Command("aplay", soundFilePath)
-	} else {
-		// Fallback: use system beep (can't be killed)
-		fmt.Print("\a")
-		return nil
-	}
-
-	if cmd != nil {
-		// Start the command but don't wait for it
-		if err := cmd.Start(); err != nil {
-			log.Printf("Failed to start sound: %v", err)
-			return nil
-		}
-	}
-
-	return cmd
-}
-
-func (a *AppState) checkAndPlaySound() {
-	hasUnacknowledged := a.HasUnacknowledgedAlerts()
-
-	a.mu.Lock()
-	shouldPlay := hasUnacknowledged && !a.soundPlaying
-	if !hasUnacknowledged && a.soundPlaying {
-		// Stop the sound loop immediately
-		close(a.soundStopChan)
-		a.soundStopChan = make(chan struct{})
-
-		// Kill any currently playing sound command
-		if a.currentSoundCmd != nil && a.currentSoundCmd.Process != nil {
-			if err := a.currentSoundCmd.Process.Kill(); err != nil {
-				log.Debugf("Error killing sound process: %v", err)
-			}
-			a.currentSoundCmd = nil
-		}
-
-		a.soundPlaying = false
-	}
-	a.mu.Unlock()
-
-	if shouldPlay {
-		go a.playSoundLoop()
-	}
-}
-
-func (a *AppState) playSoundLoop() {
-	a.mu.Lock()
-	if a.soundPlaying {
-		a.mu.Unlock()
-		return
-	}
-	a.soundPlaying = true
-	stopChan := a.soundStopChan
-	a.mu.Unlock()
-
-	log.Infof("Starting continuous sound loop for unacknowledged alerts")
-
-	for {
-		// Check if we should stop
-		select {
-		case <-stopChan:
-			log.Infof("Stopping sound loop")
+// soundHandler serves the sound file
+func soundHandler(state *AppState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+
+		soundPath := state.config.SoundEffectFilePath
+		// Convert relative path to absolute if needed
+		if !filepath.IsAbs(soundPath) {
+			wd, err := os.Getwd()
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to get working directory: %v", err), http.StatusInternalServerError)
+				return
+			}
+			soundPath = filepath.Join(wd, soundPath)
+		}
+
+		// Check if file exists
+		if _, err := os.Stat(soundPath); os.IsNotExist(err) {
+			http.Error(w, fmt.Sprintf("Sound file not found: %s", soundPath), http.StatusNotFound)
+			return
+		}
+
+		// Set content type based on file extension
+		ext := filepath.Ext(soundPath)
+		switch ext {
+		case ".wav":
+			w.Header().Set("Content-Type", "audio/wav")
+		case ".mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+		case ".ogg":
+			w.Header().Set("Content-Type", "audio/ogg")
 		default:
+			w.Header().Set("Content-Type", "audio/wav")
 		}
 
-		// Check if there are still unacknowledged alerts
-		if !a.HasUnacknowledgedAlerts() {
-			a.mu.Lock()
-			a.soundPlaying = false
-			if a.currentSoundCmd != nil && a.currentSoundCmd.Process != nil {
-				a.currentSoundCmd.Process.Kill()
-				a.currentSoundCmd = nil
-			}
-			a.mu.Unlock()
+		http.ServeFile(w, r, soundPath)
+	}
+}
+
+// statusHandler returns the current alert status as JSON
+func statusHandler(state *AppState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// Play sound and store the command so it can be killed
-		cmd := a.startSound(a.config.SoundEffectFilePath)
-		if cmd != nil {
-			a.mu.Lock()
-			a.currentSoundCmd = cmd
-			a.mu.Unlock()
-		}
+		hasUnacknowledged := state.HasUnacknowledgedAlerts()
 
-		// Wait for sound to finish or stop signal
-		soundDone := make(chan error, 1)
-		go func() {
-			if cmd != nil {
-				soundDone <- cmd.Wait()
-			} else {
-				soundDone <- nil
-			}
-		}()
-
-		select {
-		case <-stopChan:
-			// Stop signal received, kill the sound
-			a.mu.Lock()
-			if a.currentSoundCmd != nil && a.currentSoundCmd.Process != nil {
-				a.currentSoundCmd.Process.Kill()
-				a.currentSoundCmd = nil
-			}
-			a.mu.Unlock()
-			log.Infof("Stopping sound loop")
-			return
-		case <-soundDone:
-			// Sound finished playing
-			a.mu.Lock()
-			a.currentSoundCmd = nil
-			a.mu.Unlock()
-		}
-
-		// Wait a bit before playing again, but check for stop signal
-		select {
-		case <-stopChan:
-			log.Infof("Stopping sound loop")
-			return
-		case <-time.After(2 * time.Second):
-			// Continue loop
-		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{
+			"hasUnacknowledged": hasUnacknowledged,
+		})
 	}
 }
 
@@ -431,6 +590,12 @@ func clearHandler(state *AppState) http.HandlerFunc {
 		clearedCount := state.ClearAcknowledgedAndResolved()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(fmt.Sprintf("Cleared %d alerts", clearedCount)))
+	}
+}
+
+func wsHandler(state *AppState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocket(state.hub, state, w, r)
 	}
 }
 
@@ -617,32 +782,91 @@ func indexHandler(state *AppState) http.HandlerFunc {
             background: #ccc;
             cursor: not-allowed;
         }
-        .acknowledged {
-            border: 2px solid #ffc107;
-        }
-        .ack-status {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: bold;
-            margin-left: 8px;
-            background: #ffc107;
-            color: #333;
-        }
     </style>
     <script>
-        function refreshPage() {
-            location.reload();
+        // WebSocket connection
+        let ws = null;
+        let reconnectTimeout = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectDelay = 3000;
+
+        // Current state
+        let currentAlerts = [];
+        let currentHasUnacknowledged = false;
+
+        // Sound playback
+        let soundAudio = null;
+        let soundInterval = null;
+        let soundEnabled = true;
+        let audioContextUnlocked = false;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = protocol + '//' + window.location.host + '/ws';
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function() {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    if (message.type === 'update') {
+                        currentAlerts = message.alerts || [];
+                        currentHasUnacknowledged = message.hasUnacknowledged || false;
+                        updateUI();
+                        updateSoundStatus();
+                    }
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket disconnected');
+                ws = null;
+                
+                // Attempt to reconnect
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    reconnectTimeout = setTimeout(connectWebSocket, reconnectDelay);
+                    console.log('Attempting to reconnect (' + reconnectAttempts + '/' + maxReconnectAttempts + ')...');
+                } else {
+                    console.error('Max reconnection attempts reached');
+                }
+            };
         }
+
         function acknowledgeAlert(alertId) {
+            // Unlock audio context if needed (this is user interaction)
+            if (!audioContextUnlocked) {
+                if (!soundAudio) {
+                    initializeAudio();
+                }
+                if (soundAudio) {
+                    soundAudio.play().then(() => {
+                        audioContextUnlocked = true;
+                        soundAudio.pause();
+                        soundAudio.currentTime = 0;
+                    }).catch(err => {
+                        console.error('Error unlocking audio:', err);
+                    });
+                }
+            }
+            
             fetch('/acknowledge?id=' + alertId, {
                 method: 'POST'
             })
             .then(response => {
-                if (response.ok) {
-                    refreshPage();
-                } else {
+                if (!response.ok) {
                     alert('Failed to acknowledge alert');
                 }
             })
@@ -651,14 +875,29 @@ func indexHandler(state *AppState) http.HandlerFunc {
                 alert('Failed to acknowledge alert');
             });
         }
+
         function clearAlerts() {
+            // Unlock audio context if needed (this is user interaction)
+            if (!audioContextUnlocked) {
+                if (!soundAudio) {
+                    initializeAudio();
+                }
+                if (soundAudio) {
+                    soundAudio.play().then(() => {
+                        audioContextUnlocked = true;
+                        soundAudio.pause();
+                        soundAudio.currentTime = 0;
+                    }).catch(err => {
+                        console.error('Error unlocking audio:', err);
+                    });
+                }
+            }
+            
             fetch('/clear', {
                 method: 'POST'
             })
             .then(response => {
-                if (response.ok) {
-                    refreshPage();
-                } else {
+                if (!response.ok) {
                     alert('Failed to clear alerts');
                 }
             })
@@ -667,8 +906,221 @@ func indexHandler(state *AppState) http.HandlerFunc {
                 alert('Failed to clear alerts');
             });
         }
-        // Auto-refresh every 5 seconds
-        setInterval(refreshPage, 5000);
+
+        function updateUI() {
+            // Update status indicator
+            const statusEl = document.querySelector('.status');
+            if (statusEl) {
+                statusEl.className = 'status ' + (currentHasUnacknowledged ? 'active' : 'clear');
+                statusEl.textContent = currentHasUnacknowledged ? '⚠️ UNACKNOWLEDGED ALERTS' : '✓ ALL CLEAR';
+            }
+
+            // Update alert list
+            const alertListEl = document.querySelector('.alert-list');
+            if (!alertListEl) return;
+
+            if (currentAlerts.length === 0) {
+                alertListEl.innerHTML = '<div class="empty-state">' +
+                    '<h2>No alerts received yet</h2>' +
+                    '<p>Waiting for Alertmanager to send alerts...</p>' +
+                    '</div>';
+                return;
+            }
+
+            let html = '';
+            currentAlerts.forEach(entry => {
+                const alert = entry.alert || entry.Alert;
+                const isAcknowledged = entry.isAcknowledged || false;
+                
+                // Determine status
+                let statusClass = 'resolved';
+                let statusText = 'Resolved';
+                const alertStatus = alert.status || alert.Status;
+
+                if (alertStatus === 'firing') {
+                    if (isAcknowledged) {
+                        statusClass = 'acknowledged';
+                        statusText = 'Acknowledged';
+                    } else {
+                        statusClass = 'firing';
+                        statusText = 'Firing';
+                    }
+                } else if (alertStatus === 'resolved') {
+                    statusClass = 'resolved';
+                    statusText = 'Resolved';
+                }
+
+                const timestamp = entry.timestamp || entry.Timestamp;
+                const timestampStr = typeof timestamp === 'string' ? timestamp : new Date(timestamp).toLocaleString();
+
+                html += '<div class="alert-card">' +
+                    '<div class="alert-header">' +
+                    '<div>' +
+                    '<div class="alert-id">ID: ' + (entry.id || entry.ID) + '</div>' +
+                    '<div class="alert-time">' + timestampStr + '</div>' +
+                    '</div>' +
+                    '<div>' +
+                    '<div class="alert-status ' + statusClass + '">' + statusText + '</div>' +
+                    '</div>' +
+                    '</div>';
+
+                if (alertStatus === 'firing' && !isAcknowledged) {
+                    html += '<div style="margin-bottom: 15px;">' +
+                        '<button class="ack-btn" onclick="acknowledgeAlert(\'' + (entry.id || entry.ID) + '\')">' +
+                        '✓ Acknowledge Alert' +
+                        '</button>' +
+                        '</div>';
+                }
+
+                html += '<div class="alert-item ' + statusClass + '">';
+
+                const labels = alert.labels || alert.Labels || {};
+                if (Object.keys(labels).length > 0) {
+                    const alertName = labels.alertname || labels.alertname;
+                    if (alertName) {
+                        html += '<div style="margin: 8px 0;"><span style="font-size: 16px; font-weight: bold; color: #333;">' + alertName + '</span></div>';
+                    }
+
+                    html += '<div style="margin: 8px 0;"><strong>Labels:</strong><br>';
+                    const labelKeys = Object.keys(labels).sort();
+                    labelKeys.forEach(function(k) {
+                        html += '<span class="label">' + k + '=' + labels[k] + '</span>';
+                    });
+                    html += '</div>';
+                }
+
+                const startsAt = alert.startsAt || alert.StartsAt;
+                if (startsAt) {
+                    const startsAtStr = typeof startsAt === 'string' ? startsAt : new Date(startsAt).toLocaleString();
+                    html += '<div style="margin-top: 8px; font-size: 12px; color: #666;">Started: ' + startsAtStr + '</div>';
+                }
+
+                const endsAt = alert.endsAt || alert.EndsAt;
+                if (endsAt) {
+                    const endsAtStr = typeof endsAt === 'string' ? endsAt : new Date(endsAt).toLocaleString();
+                    html += '<div style="margin-top: 4px; font-size: 12px; color: #666;">Ended: ' + endsAtStr + '</div>';
+                }
+
+                html += '</div></div>';
+            });
+
+            alertListEl.innerHTML = html;
+        }
+
+        function initializeAudio() {
+            if (!soundAudio) {
+                soundAudio = new Audio('/sound');
+                soundAudio.volume = 1.0;
+                soundAudio.preload = 'auto';
+                
+                soundAudio.addEventListener('ended', function() {
+                    if (soundInterval !== null && soundEnabled && currentHasUnacknowledged) {
+                        setTimeout(() => {
+                            if (soundInterval !== null && soundEnabled && currentHasUnacknowledged) {
+                                soundAudio.play().catch(err => {
+                                    console.error('Error playing sound after end:', err);
+                                });
+                            }
+                        }, 2000);
+                    }
+                });
+                
+                soundAudio.addEventListener('error', function(e) {
+                    console.error('Error loading sound:', e);
+                    stopSoundLoop();
+                });
+            }
+        }
+
+        function updateSoundStatus() {
+            if (currentHasUnacknowledged && soundEnabled && audioContextUnlocked) {
+                        startSoundLoop();
+                    } else {
+                        stopSoundLoop();
+                    }
+        }
+
+        function startSoundLoop() {
+            if (soundInterval !== null) {
+                return;
+            }
+            
+            if (!soundAudio || !soundEnabled || !audioContextUnlocked) {
+                return;
+            }
+
+            soundAudio.play().catch(err => {
+                console.error('Error playing sound:', err);
+            });
+
+            soundInterval = setInterval(() => {
+                if (!soundEnabled || !audioContextUnlocked || !currentHasUnacknowledged) {
+                    stopSoundLoop();
+                    return;
+                }
+                
+                if (soundAudio.paused && soundInterval !== null) {
+                            soundAudio.play().catch(err => {
+                                console.error('Error restarting sound:', err);
+                            });
+                        }
+            }, 1000);
+        }
+
+        function stopSoundLoop() {
+            if (soundInterval !== null) {
+                clearInterval(soundInterval);
+                soundInterval = null;
+            }
+            if (soundAudio && !soundAudio.paused) {
+                soundAudio.pause();
+                soundAudio.currentTime = 0;
+            }
+        }
+
+        // Initialize audio
+        initializeAudio();
+
+        // Try to unlock audio context automatically
+        if (soundAudio) {
+            soundAudio.play().then(() => {
+                audioContextUnlocked = true;
+                soundAudio.pause();
+                soundAudio.currentTime = 0;
+            }).catch(err => {
+                console.log('Could not auto-unlock audio. Audio will unlock on next user interaction.');
+                const unlockOnInteraction = function() {
+                    if (!audioContextUnlocked && soundAudio) {
+                        soundAudio.play().then(() => {
+                            audioContextUnlocked = true;
+                            soundAudio.pause();
+                            soundAudio.currentTime = 0;
+                            updateSoundStatus();
+                        }).catch(e => {
+                            console.error('Error unlocking audio:', e);
+                        });
+                    }
+                    document.removeEventListener('click', unlockOnInteraction);
+                    document.removeEventListener('keydown', unlockOnInteraction);
+                };
+                document.addEventListener('click', unlockOnInteraction, { once: true });
+                document.addEventListener('keydown', unlockOnInteraction, { once: true });
+            });
+        }
+
+        // Connect WebSocket
+        connectWebSocket();
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (ws) {
+                ws.close();
+            }
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+            }
+            stopSoundLoop();
+        });
     </script>
 </head>
 <body>
@@ -678,7 +1130,6 @@ func indexHandler(state *AppState) http.HandlerFunc {
             <div class="status ` + getStatusClass(hasUnacknowledged) + `">
                 ` + getStatusText(hasUnacknowledged) + `
             </div>
-            <button class="refresh-btn" onclick="refreshPage()">Refresh</button>
             <button class="clear-btn" onclick="clearAlerts()">Clear</button>
         </div>
         <div class="alert-list">`
@@ -696,25 +1147,23 @@ func indexHandler(state *AppState) http.HandlerFunc {
 
 				// Determine status class and text
 				statusClass := "resolved"
-				statusText := alert.Status
-				cardClass := ""
-				ackStatusHTML := ""
+				statusText := "Resolved"
 
 				if alert.Status == "firing" {
 					if isAcknowledged {
 						statusClass = "acknowledged"
-						statusText = "acknowledged"
-						cardClass = "acknowledged"
-						ackStatusHTML = `<span class="ack-status">✓ ACKNOWLEDGED</span>`
+						statusText = "Acknowledged"
 					} else {
 						statusClass = "firing"
+						statusText = "Firing"
 					}
 				} else if alert.Status == "resolved" {
 					statusClass = "resolved"
+					statusText = "Resolved"
 				}
 
 				html += fmt.Sprintf(`
-            <div class="alert-card %s">
+            <div class="alert-card">
                 <div class="alert-header">
                     <div>
                         <div class="alert-id">ID: %s</div>
@@ -722,9 +1171,8 @@ func indexHandler(state *AppState) http.HandlerFunc {
                     </div>
                     <div>
                         <div class="alert-status %s">%s</div>
-                        %s
                     </div>
-                </div>`, cardClass, entry.ID, entry.Timestamp.Format("2006-01-02 15:04:05"), statusClass, statusText, ackStatusHTML)
+                </div>`, entry.ID, entry.Timestamp.Format("2006-01-02 15:04:05"), statusClass, statusText)
 
 				if alert.Status == "firing" && !isAcknowledged {
 					html += fmt.Sprintf(`
